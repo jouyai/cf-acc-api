@@ -311,6 +311,18 @@ def run_parallel(accounts: list[dict], workers: int):
     for acc in accounts:
         acc_queue.put(acc)
 
+    # Error yang bisa di-retry dengan proxy berbeda
+    PROXY_ERRORS = [
+        "net::ERR_CERT", "net::ERR_PROXY", "net::ERR_CONNECTION",
+        "net::ERR_TUNNEL", "net::ERR_ABORTED", "net::ERR_TIMED_OUT",
+        "Target page, context or browser has been closed",
+        "Connection closed", "ERR_EMPTY_RESPONSE",
+    ]
+    MAX_RETRY = 5  # max retry per akun
+
+    def _is_proxy_error(reason: str) -> bool:
+        return any(e in reason for e in PROXY_ERRORS)
+
     def worker_loop(wid: int):
         # Stagger start agar tidak semua login bersamaan
         stagger = random.uniform(1.5, 3.0) * (wid - 1)
@@ -324,19 +336,46 @@ def run_parallel(accounts: list[dict], workers: int):
             except queue.Empty:
                 break
 
-            # Ambil proxy — dari akun atau rotasi dari proxy_manager
-            proxy = acc.get("proxy")
-            if not proxy and proxy_manager.has_proxies():
-                proxy = proxy_manager.get_next()
+            # Retry loop — coba sampai sukses atau max retry habis
+            retry = 0
+            result = None
+            while retry < MAX_RETRY:
+                # Ambil proxy baru setiap retry
+                proxy = acc.get("proxy")
+                if not proxy and proxy_manager.has_proxies():
+                    proxy = proxy_manager.get_next()
 
-            result = run_one(
-                wid,
-                acc["email"],
-                acc["password"],
-                mode=acc.get("mode", "google"),
-                tm_token=acc.get("tm_token"),
-                proxy=proxy,
-            )
+                if retry > 0:
+                    log.info(f"[W{wid}] Retry #{retry} untuk {acc.get('email', 'tempmail')} proxy={proxy}")
+                    _set_worker(wid, acc.get("email", "—"), "waiting")
+                    time.sleep(random.uniform(1.0, 2.0))
+
+                result = run_one(
+                    wid,
+                    acc["email"],
+                    acc["password"],
+                    mode=acc.get("mode", "google"),
+                    tm_token=acc.get("tm_token"),
+                    proxy=proxy,
+                )
+
+                if result["status"] == "success":
+                    break  # sukses, tidak perlu retry
+
+                reason = result.get("reason", "")
+
+                # Kalau error proxy — retry dengan proxy lain
+                if _is_proxy_error(reason) and proxy_manager.has_proxies():
+                    log.warning(f"[W{wid}] Proxy error, retry dengan proxy lain: {reason[:60]}")
+                    # Reset email untuk tempmail (generate email baru)
+                    if acc.get("mode") == "tempmail":
+                        acc["email"] = f"__tempmail_retry_{retry}__"
+                        acc["password"] = ""
+                    retry += 1
+                    continue
+
+                # Error lain (register gagal, CAPTCHA, dll) — tidak retry
+                break
 
             with _lock:
                 counters[0] += 1
@@ -345,7 +384,7 @@ def run_parallel(accounts: list[dict], workers: int):
                     delay = random.uniform(*config.DELAY_BETWEEN_ACCOUNTS)
                 else:
                     counters[2] += 1
-                    delay = 0  # gagal → langsung lanjut
+                    delay = 0
 
             storage.save_result(config.OUTPUT_FILE, result)
             progress.advance(task)
