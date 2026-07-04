@@ -60,35 +60,36 @@ def _create_and_poll(api_key: str, task: dict, max_wait: int = 120) -> dict | No
 
 
 def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_TURNSTILE_KEY, proxy: str | None = None) -> str | None:
-    """
-    Solve Cloudflare Turnstile.
-    Kalau proxy disediakan, pakai TurnstileTask (dengan proxy) agar token IP match.
-    """
+    """Solve Cloudflare Turnstile. Coba dengan proxy dulu, fallback ke proxyless."""
     log.info(f"[capsolver] Solving Turnstile {'via proxy' if proxy else 'proxyless'}...")
 
-    task: dict = {
-        "websiteURL": url,
-        "websiteKey": site_key,
-    }
-
+    # Coba TurnstileTask dengan proxy dulu
     if proxy:
         proxy_data = _parse_proxy(proxy)
         if proxy_data:
-            task["type"] = "TurnstileTask"
-            task.update(proxy_data)
-            log.info(f"[capsolver] Pakai proxy: {proxy_data.get('proxyAddress')}:{proxy_data.get('proxyPort')}")
-        else:
-            # Proxy tidak valid — fallback ke proxyless
-            log.warning("[capsolver] Proxy tidak valid, fallback ke proxyless")
-            task["type"] = "AntiTurnstileTaskProxyLess"
-    else:
-        task["type"] = "AntiTurnstileTaskProxyLess"
+            task = {
+                "type":       "TurnstileTask",
+                "websiteURL": url,
+                "websiteKey": site_key,
+                **proxy_data,
+            }
+            log.info(f"[capsolver] TurnstileTask proxy: {proxy_data.get('proxyAddress')}:{proxy_data.get('proxyPort')}")
+            solution = _create_and_poll(api_key, task)
+            if solution and solution.get("token"):
+                log.info(f"[capsolver] ✓ Token via proxy: {solution['token'][:20]}...")
+                return solution["token"]
+            log.warning("[capsolver] TurnstileTask gagal, fallback ke proxyless...")
 
-    solution = _create_and_poll(api_key, task)
+    # Fallback: AntiTurnstileTaskProxyLess
+    solution = _create_and_poll(api_key, {
+        "type":       "AntiTurnstileTaskProxyLess",
+        "websiteURL": url,
+        "websiteKey": site_key,
+    })
     if solution:
         token = solution.get("token")
         if token:
-            log.info(f"[capsolver] ✓ Token: {token[:20]}...")
+            log.info(f"[capsolver] ✓ Token proxyless: {token[:20]}...")
         return token
     return None
 

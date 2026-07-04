@@ -318,10 +318,20 @@ def run_parallel(accounts: list[dict], workers: int):
         "Target page, context or browser has been closed",
         "Connection closed", "ERR_EMPTY_RESPONSE",
     ]
-    MAX_RETRY = 5  # max retry per akun
+    # Error yang retry tapi tidak ganti proxy (CAPTCHA, rate limit)
+    CAPTCHA_ERRORS = [
+        "CAPTCHA masih muncul", "Please complete the CAPTCHA",
+        "unable to sign up", "register gagal",
+    ]
+    MAX_RETRY = 10  # max retry per akun — retry terus sampai sukses
 
     def _is_proxy_error(reason: str) -> bool:
         return any(e in reason for e in PROXY_ERRORS)
+
+    def _is_retryable(reason: str) -> bool:
+        """Semua error di-retry kecuali error fatal."""
+        FATAL = ["password yang salah", "email tidak valid", "gagal generate tempmail"]
+        return not any(e in reason for e in FATAL)
 
     def worker_loop(wid: int):
         # Stagger start agar tidak semua login bersamaan
@@ -346,9 +356,9 @@ def run_parallel(accounts: list[dict], workers: int):
                     proxy = proxy_manager.get_next()
 
                 if retry > 0:
-                    log.info(f"[W{wid}] Retry #{retry} untuk {acc.get('email', 'tempmail')} proxy={proxy}")
+                    log.info(f"[W{wid}] Retry #{retry}/{MAX_RETRY} proxy={proxy}")
                     _set_worker(wid, acc.get("email", "—"), "waiting")
-                    time.sleep(random.uniform(1.0, 2.0))
+                    time.sleep(random.uniform(2.0, 4.0))
 
                 result = run_one(
                     wid,
@@ -360,22 +370,21 @@ def run_parallel(accounts: list[dict], workers: int):
                 )
 
                 if result["status"] == "success":
-                    break  # sukses, tidak perlu retry
+                    break  # sukses
 
                 reason = result.get("reason", "")
 
-                # Kalau error proxy — retry dengan proxy lain
-                if _is_proxy_error(reason) and proxy_manager.has_proxies():
-                    log.warning(f"[W{wid}] Proxy error, retry dengan proxy lain: {reason[:60]}")
-                    # Reset email untuk tempmail (generate email baru)
-                    if acc.get("mode") == "tempmail":
-                        acc["email"] = f"__tempmail_retry_{retry}__"
-                        acc["password"] = ""
-                    retry += 1
-                    continue
+                # Kalau tidak bisa di-retry (error fatal) → stop
+                if not _is_retryable(reason):
+                    log.error(f"[W{wid}] Fatal error, tidak retry: {reason[:80]}")
+                    break
 
-                # Error lain (register gagal, CAPTCHA, dll) — tidak retry
-                break
+                # Semua error lain → retry dengan proxy baru + email baru (tempmail)
+                log.warning(f"[W{wid}] Retry #{retry+1} karena: {reason[:60]}")
+                if acc.get("mode") == "tempmail":
+                    acc["email"]    = f"__tempmail_r{retry}__"
+                    acc["password"] = ""
+                retry += 1
 
             with _lock:
                 counters[0] += 1
