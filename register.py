@@ -299,142 +299,149 @@ SIGNUP_FORM_URL = "https://dash.cloudflare.com/sign-up"
 
 def register_tempmail(page, email: str, password: str) -> bool:
     """
-    Register akun Cloudflare baru via form email+password biasa.
-    Dipakai untuk akun tempmail (bukan Google OAuth).
-
-    Returns True kalau form berhasil disubmit (masih perlu verifikasi email).
+    Register akun Cloudflare baru via form email+password.
+    Solve Turnstile via CapSolver lalu inject token via turnstile.render callback.
     """
     import config
     try:
         log.info(f"[register] Form register untuk: {email}")
+
+        # Solve Turnstile SEBELUM buka halaman (parallel dengan load)
+        token = None
+        if config.CAPSOLVER_API_KEY:
+            import threading
+            from captcha_solver import solve_turnstile
+            token_holder = [None]
+            def _solve():
+                token_holder[0] = solve_turnstile(api_key=config.CAPSOLVER_API_KEY)
+            t = threading.Thread(target=_solve, daemon=True)
+            t.start()
+
         page.goto(SIGNUP_FORM_URL, wait_until="domcontentloaded")
-        _d(1.0, 2.0)
 
-        # Isi email
-        email_field = page.locator('input[name="email"], input[type="email"]').first
+        # Tunggu form render
+        email_field = page.locator('input[name="email"]').first
         email_field.wait_for(state="visible", timeout=20000)
-        _type_fast(email_field, email)
-        _d(0.3, 0.5)
 
-        # Isi password
-        pass_field = page.locator('input[name="password"], input[type="password"]').first
+        # Tunggu token selesai (kalau belum)
+        if config.CAPSOLVER_API_KEY:
+            t.join(timeout=90)
+            token = token_holder[0]
+            if token:
+                log.info(f"[register] ✓ Token solved ({len(token)} chars)")
+            else:
+                log.warning("[register] Token solve gagal")
+
+        # Isi form
+        _type_fast(email_field, email)
+        _d(0.2, 0.4)
+        pass_field = page.locator('input[type="password"]').first
         pass_field.wait_for(state="visible", timeout=10000)
         _type_fast(pass_field, password)
-        _d(0.3, 0.5)
+        _d(0.2, 0.4)
 
-        # Centang ToS kalau ada
-        for tos_sel in [
-            'input[type="checkbox"][name*="agree"]',
-            'input[type="checkbox"][id*="terms"]',
-            'input[type="checkbox"][id*="tos"]',
-        ]:
-            try:
-                cb = page.locator(tos_sel).first
-                if cb.count() > 0 and not cb.is_checked():
-                    cb.check()
-                    _d(0.2, 0.4)
-            except Exception:
-                pass
+        # Inject token via turnstile.render dengan token langsung di callback
+        if token:
+            result = page.evaluate(f"""
+                () => {{
+                    const SITEKEY = '0x4AAAAAAAJel0iaAR3mgkjp';
+                    const TOKEN   = '{token}';
 
-        # ── Solve Turnstile via CapSolver ────────────────────────────────────
-        if config.CAPSOLVER_API_KEY:
-            log.info("[register] Solving Turnstile via CapSolver...")
-            try:
-                from captcha_solver import solve_turnstile
-                token = solve_turnstile(
-                    api_key=config.CAPSOLVER_API_KEY,
-                    url=SIGNUP_FORM_URL,
-                )
-                if token:
-                    # Klik submit dulu untuk trigger Turnstile widget render
-                    submit_btn = page.locator('button[type="submit"]').first
-                    submit_btn.click()
-                    _d(1.5, 2.5)
+                    // Buat hidden container
+                    let container = document.getElementById('__cf_ts__');
+                    if (!container) {{
+                        container = document.createElement('div');
+                        container.id = '__cf_ts__';
+                        container.style.cssText = 'position:absolute;left:-9999px;top:-9999px;';
+                        document.body.appendChild(container);
+                    }}
 
-                    # Inject token setelah widget render
-                    injected = page.evaluate(f"""
-                        () => {{
-                            let count = 0;
-                            // Cari semua input cf-turnstile-response yang mungkin muncul
-                            document.querySelectorAll(
-                                '[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
-                            ).forEach(el => {{ el.value = "{token}"; count++; }});
+                    let rendered = false;
+                    if (window.turnstile) {{
+                        try {{
+                            // Reset widget lama
+                            window.turnstile.remove('#__cf_ts__');
+                        }} catch(e) {{}}
 
-                            // Trigger via turnstile widget callback langsung
-                            if (window.turnstile) {{
-                                try {{
-                                    // Cari widget ID dari DOM
-                                    const widgets = document.querySelectorAll('iframe[src*="turnstile"]');
-                                    widgets.forEach(w => {{
-                                        const widgetId = w.getAttribute('data-widget-id');
-                                        if (widgetId) {{
-                                            try {{ window.turnstile.execute(widgetId); }} catch(e) {{}}
-                                        }}
-                                    }});
-                                }} catch(e) {{}}
-                            }}
-
-                            // Inject via global __cfTurnstileCallback__
-                            const keys = Object.keys(window).filter(k =>
-                                k.startsWith('cf_') || k.includes('turnstile') || k.includes('Turnstile')
-                            );
-                            keys.forEach(k => {{
-                                try {{
-                                    if (typeof window[k] === 'function') {{
-                                        window[k]("{token}");
-                                        count++;
-                                    }}
-                                }} catch(e) {{}}
+                        try {{
+                            window.turnstile.render('#__cf_ts__', {{
+                                sitekey: SITEKEY,
+                                'response-field': true,
+                                'response-field-name': 'cf-turnstile-response',
+                                callback: function(t) {{
+                                    // Inject ke semua field
+                                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                                        window.HTMLInputElement.prototype, 'value'
+                                    ).set;
+                                    document.querySelectorAll('[name="cf-turnstile-response"]')
+                                        .forEach(el => {{
+                                            nativeSetter.call(el, t);
+                                            el.dispatchEvent(new Event('input', {{bubbles:true}}));
+                                            el.dispatchEvent(new Event('change', {{bubbles:true}}));
+                                        }});
+                                }},
                             }});
+                            rendered = true;
 
-                            return {{count, keys}};
-                        }}
-                    """)
-                    log.info(f"[register] Turnstile inject result: {injected}")
-                    _d(0.5, 1.0)
+                            // Override getResponse agar return token kita
+                            const origGet = window.turnstile.getResponse;
+                            window.turnstile.getResponse = function(id) {{ return TOKEN; }};
+                            window.turnstile.isExpired = function(id) {{ return false; }};
 
-                    # Submit sekali lagi setelah inject
-                    try:
-                        submit_btn2 = page.locator('button[type="submit"]').first
-                        if submit_btn2.is_visible():
-                            submit_btn2.click()
-                            _d(0.5, 1.0)
-                    except Exception:
-                        pass
-                else:
-                    log.warning("[register] CapSolver gagal dapat token, lanjut tanpa solve")
-                    # Submit tanpa token — mungkin browser fingerprint cukup
-                    submit_btn = page.locator('button[type="submit"]').first
-                    submit_btn.click()
-                    _d(1.0, 2.0)
-            except Exception as e:
-                log.warning(f"[register] CapSolver exception: {e}")
-                # Tetap submit
-                try:
-                    page.locator('button[type="submit"]').first.click()
-                except Exception:
-                    pass
-        else:
-            # Tidak ada CapSolver — langsung submit
-            submit_btn = page.locator('button[type="submit"]').first
-            submit_btn.wait_for(state="visible", timeout=10000)
-            _d(0.5, 1.0)
-            submit_btn.click()
+                        }} catch(e) {{ return {{error: e.toString()}}; }}
+                    }}
 
-        # Tunggu redirect ke halaman verifikasi email
+                    // Inject langsung via native setter
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value'
+                    ).set;
+                    let directSet = 0;
+                    document.querySelectorAll('[name="cf-turnstile-response"]').forEach(el => {{
+                        nativeSetter.call(el, TOKEN);
+                        el.dispatchEvent(new Event('input', {{bubbles:true}}));
+                        el.dispatchEvent(new Event('change', {{bubbles:true}}));
+                        directSet++;
+                    }});
+
+                    return {{rendered, directSet,
+                             inputs: document.querySelectorAll('[name="cf-turnstile-response"]').length}};
+                }}
+            """)
+            log.info(f"[register] Inject result: {result}")
+            _d(0.5, 0.8)
+
+        # Submit
+        submit = page.locator('button[type="submit"]').first
+        submit.wait_for(state="visible", timeout=10000)
+        _d(0.3, 0.5)
+        submit.click()
+
+        # Tunggu redirect ke halaman verifikasi
         try:
             page.wait_for_url(
-                lambda url: "verify" in url or "email" in url or url != SIGNUP_FORM_URL,
-                timeout=20000,
+                lambda url: url != SIGNUP_FORM_URL,
+                timeout=15000,
             )
         except Exception:
             pass
 
-        # Cek kalau masih di sign-up (CAPTCHA gagal)
-        if page.url == SIGNUP_FORM_URL or "sign-up" in page.url:
-            log.warning("[register] Masih di sign-up page — mungkin CAPTCHA tidak tersolve")
+        current_url = page.url
+        if "sign-up" in current_url:
+            # Cek pesan error
+            body = ""
+            try:
+                body = page.inner_text("body")
+            except Exception:
+                pass
+            if "unable" in body.lower() or "rate" in body.lower():
+                log.error("[register] Cloudflare block: unable to sign up (rate limit/IP block)")
+                return False
+            if "captcha" in body.lower() or "human" in body.lower():
+                log.error("[register] CAPTCHA masih muncul — token tidak diterima")
+                return False
+            log.warning(f"[register] Masih di sign-up. URL: {current_url}")
 
-        log.info(f"[register] Form submitted. URL: {page.url}")
+        log.info(f"[register] Submitted. URL: {current_url}")
         return True
 
     except Exception as e:
