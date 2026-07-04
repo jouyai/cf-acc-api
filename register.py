@@ -383,6 +383,10 @@ def register_tempmail(page, email: str, password: str, proxy: str | None = None)
         # Tunggu Turnstile widget solve sendiri (CloakBrowser stealth)
         # Turnstile biasanya auto-solve dalam 2-5 detik pada browser normal
         log.info("[register] Menunggu Turnstile auto-solve...")
+
+        # Dismiss cookie popup lagi kalau muncul setelah form render
+        _dismiss_cookie_popup(page)
+
         _d(3.0, 5.0)
 
         # Submit form
