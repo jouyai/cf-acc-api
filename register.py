@@ -355,156 +355,76 @@ def _dismiss_cookie_popup(page, timeout: int = 5000):
 def register_tempmail(page, email: str, password: str, proxy: str | None = None) -> bool:
     """
     Register akun Cloudflare baru via form email+password.
-    Solve Turnstile via CapSolver dengan proxy yang sama agar token valid.
+    Biarkan Turnstile solve otomatis (CloakBrowser stealth).
+    Kalau CAPTCHA muncul, tunggu auto-solve atau retry.
     """
-    import config
     try:
         log.info(f"[register] Form register untuk: {email}")
 
-        # Solve Turnstile SEBELUM buka halaman (parallel dengan load)
-        # PENTING: pass proxy yang sama agar token di-bind ke IP yang sama
-        token = None
-        if config.CAPSOLVER_API_KEY:
-            import threading
-            from captcha_solver import solve_turnstile
-            token_holder = [None]
-            def _solve():
-                token_holder[0] = solve_turnstile(
-                    api_key=config.CAPSOLVER_API_KEY,
-                    proxy=proxy,  # pass proxy agar IP match
-                )
-            t = threading.Thread(target=_solve, daemon=True)
-            t.start()
-
         page.goto(SIGNUP_FORM_URL, wait_until="domcontentloaded")
+        _d(1.0, 1.5)
 
-        # Dismiss cookie consent popup kalau muncul
+        # Dismiss cookie popup
         _dismiss_cookie_popup(page)
 
         # Tunggu form render
         email_field = page.locator('input[name="email"]').first
         email_field.wait_for(state="visible", timeout=20000)
 
-        # Tunggu token selesai (kalau belum)
-        if config.CAPSOLVER_API_KEY:
-            t.join(timeout=90)
-            token = token_holder[0]
-            if token:
-                log.info(f"[register] ✓ Token solved ({len(token)} chars)")
-            else:
-                log.warning("[register] Token solve gagal")
-
         # Isi form
         _type_fast(email_field, email)
-        _d(0.2, 0.4)
+        _d(0.3, 0.5)
+
         pass_field = page.locator('input[type="password"]').first
         pass_field.wait_for(state="visible", timeout=10000)
         _type_fast(pass_field, password)
-        _d(0.2, 0.4)
+        _d(0.5, 1.0)
 
-        # Inject token via turnstile.render dengan token langsung di callback
-        if token:
-            result = page.evaluate(f"""
-                () => {{
-                    const SITEKEY = '0x4AAAAAAAJel0iaAR3mgkjp';
-                    const TOKEN   = '{token}';
+        # Tunggu Turnstile widget solve sendiri (CloakBrowser stealth)
+        # Turnstile biasanya auto-solve dalam 2-5 detik pada browser normal
+        log.info("[register] Menunggu Turnstile auto-solve...")
+        _d(3.0, 5.0)
 
-                    // Buat hidden container
-                    let container = document.getElementById('__cf_ts__');
-                    if (!container) {{
-                        container = document.createElement('div');
-                        container.id = '__cf_ts__';
-                        container.style.cssText = 'position:absolute;left:-9999px;top:-9999px;';
-                        document.body.appendChild(container);
-                    }}
-
-                    let rendered = false;
-                    if (window.turnstile) {{
-                        try {{
-                            // Reset widget lama
-                            window.turnstile.remove('#__cf_ts__');
-                        }} catch(e) {{}}
-
-                        try {{
-                            window.turnstile.render('#__cf_ts__', {{
-                                sitekey: SITEKEY,
-                                'response-field': true,
-                                'response-field-name': 'cf-turnstile-response',
-                                callback: function(t) {{
-                                    // Inject ke semua field
-                                    const nativeSetter = Object.getOwnPropertyDescriptor(
-                                        window.HTMLInputElement.prototype, 'value'
-                                    ).set;
-                                    document.querySelectorAll('[name="cf-turnstile-response"]')
-                                        .forEach(el => {{
-                                            nativeSetter.call(el, t);
-                                            el.dispatchEvent(new Event('input', {{bubbles:true}}));
-                                            el.dispatchEvent(new Event('change', {{bubbles:true}}));
-                                        }});
-                                }},
-                            }});
-                            rendered = true;
-
-                            // Override getResponse agar return token kita
-                            const origGet = window.turnstile.getResponse;
-                            window.turnstile.getResponse = function(id) {{ return TOKEN; }};
-                            window.turnstile.isExpired = function(id) {{ return false; }};
-
-                        }} catch(e) {{ return {{error: e.toString()}}; }}
-                    }}
-
-                    // Inject langsung via native setter
-                    const nativeSetter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value'
-                    ).set;
-                    let directSet = 0;
-                    document.querySelectorAll('[name="cf-turnstile-response"]').forEach(el => {{
-                        nativeSetter.call(el, TOKEN);
-                        el.dispatchEvent(new Event('input', {{bubbles:true}}));
-                        el.dispatchEvent(new Event('change', {{bubbles:true}}));
-                        directSet++;
-                    }});
-
-                    return {{rendered, directSet,
-                             inputs: document.querySelectorAll('[name="cf-turnstile-response"]').length}};
-                }}
-            """)
-            log.info(f"[register] Inject result: {result}")
-            _d(0.5, 0.8)
-
-        # Submit
+        # Submit form
         submit = page.locator('button[type="submit"]').first
         submit.wait_for(state="visible", timeout=10000)
-        _d(0.3, 0.5)
         submit.click()
 
-        # Tunggu redirect ke halaman verifikasi
-        try:
-            page.wait_for_url(
-                lambda url: url != SIGNUP_FORM_URL,
-                timeout=15000,
-            )
-        except Exception:
-            pass
-
-        current_url = page.url
-        if "sign-up" in current_url:
-            # Cek pesan error
-            body = ""
+        # Tunggu redirect — max 30 detik
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            url = page.url
+            if url != SIGNUP_FORM_URL and "sign-up" not in url:
+                log.info(f"[register] ✓ Redirect ke: {url}")
+                return True
             try:
                 body = page.inner_text("body")
             except Exception:
-                pass
-            if "unable" in body.lower() or "rate" in body.lower():
-                log.error("[register] Cloudflare block: unable to sign up (rate limit/IP block)")
-                return False
-            if "captcha" in body.lower() or "human" in body.lower():
-                log.error("[register] CAPTCHA masih muncul — token tidak diterima")
-                return False
-            log.warning(f"[register] Masih di sign-up. URL: {current_url}")
+                body = ""
 
-        log.info(f"[register] Submitted. URL: {current_url}")
-        return True
+            # Rate limit / IP block — tidak bisa di-retry dengan email sama
+            if "unable" in body.lower() and "sign up" in body.lower():
+                log.error("[register] IP/rate limit block dari Cloudflare")
+                return False
+
+            # CAPTCHA masih muncul — tunggu auto-solve atau submit ulang
+            if "captcha" in body.lower() or "human" in body.lower():
+                log.warning("[register] CAPTCHA muncul, tunggu auto-solve...")
+                _d(3.0, 5.0)
+                # Coba submit ulang
+                try:
+                    btn = page.locator('button[type="submit"]').first
+                    if btn.is_visible():
+                        btn.click()
+                except Exception:
+                    pass
+                continue
+
+            _d(1.0, 1.5)
+
+        log.warning(f"[register] Timeout. URL terakhir: {page.url}")
+        # Return True kalau URL sudah berubah dari sign-up
+        return "sign-up" not in page.url
 
     except Exception as e:
         log.error(f"[register] register_tempmail exception: {e}")
