@@ -44,6 +44,11 @@ CLOAKBROWSER_LICENSE_KEY = os.getenv("CLOAKBROWSER_LICENSE_KEY", None)
 # Daftar di https://capsolver.com
 CAPSOLVER_API_KEY = os.getenv("CAPSOLVER_API_KEY", "")
 
-# Mailsac API key (wajib untuk mode tempmail dengan provider mailsac)
+# --- Email Provider untuk mode tempmail ---
+# "mailsac" : pakai Mailsac API (butuh MAILSAC_API_KEY)
+# "mailtm"  : pakai mail.tm (gratis, tidak butuh API key)
+TEMPMAIL_PROVIDER = os.getenv("TEMPMAIL_PROVIDER", "mailsac")
+
+# Mailsac API key (wajib untuk provider mailsac)
 # Daftar di https://mailsac.com dan ambil API key
 MAILSAC_API_KEY = os.getenv("MAILSAC_API_KEY", "")
