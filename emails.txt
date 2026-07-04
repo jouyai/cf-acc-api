@@ -1,0 +1,5 @@
+# Format: email:password (satu per baris)
+# Baris yang diawali # diabaikan
+# Contoh:
+# akun1@gmail.com:MyP@ssw0rd123
+# akun2@yourdomain.com:AnotherPass456
