@@ -28,6 +28,20 @@ def _random_string(length: int = 10) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 
+def _generate_password(length: int = 14) -> str:
+    """Generate password yang memenuhi syarat Cloudflare."""
+    chars = string.ascii_letters + string.digits + "!@#$%&"
+    pwd = [
+        random.choice(string.ascii_uppercase),   # min 1 huruf besar
+        random.choice(string.ascii_lowercase),   # min 1 huruf kecil
+        random.choice(string.digits),            # min 1 angka
+        random.choice("!@#$%&"),                 # min 1 special char
+    ]
+    pwd += random.choices(chars, k=length - 4)
+    random.shuffle(pwd)
+    return "".join(pwd)
+
+
 # ── public API ───────────────────────────────────────────────────────────────
 
 def create_account() -> dict:
@@ -41,7 +55,7 @@ def create_account() -> dict:
 
     domain   = random.choice(domains)
     address  = f"{_random_string()}@{domain}"
-    password = _random_string(16)
+    password = _generate_password()
 
     # buat akun
     resp = requests.post(
@@ -72,28 +86,59 @@ def wait_for_email(
     interval: int = 5,
 ) -> dict | None:
     """
-    Poll inbox sampai ada email dengan subject tertentu.
+    Poll inbox sampai ada email baru.
+    Cari subject_contains dulu, kalau tidak ada ambil email pertama yang masuk.
     Return message dict atau None kalau timeout.
     """
+    import logging
+    log = logging.getLogger(__name__)
+
     auth_headers = {**HEADERS, "Authorization": f"Bearer {token}"}
     deadline = time.time() + timeout
+    seen_ids = set()
 
     while time.time() < deadline:
-        resp = requests.get(f"{BASE_URL}/messages", headers=auth_headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        messages = data.get("hydra:member", data) if isinstance(data, dict) else data
+        try:
+            resp = requests.get(f"{BASE_URL}/messages", headers=auth_headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            messages = data.get("hydra:member", data) if isinstance(data, dict) else data
 
-        for msg in messages:
-            if subject_contains.lower() in msg.get("subject", "").lower():
-                # ambil detail lengkap pesan (termasuk body)
-                detail_resp = requests.get(
-                    f"{BASE_URL}/messages/{msg['id']}",
-                    headers=auth_headers,
-                    timeout=15,
-                )
-                detail_resp.raise_for_status()
-                return detail_resp.json()
+            log.debug(f"[tempmail] Inbox: {len(messages)} pesan")
+
+            # Cari yang match subject dulu
+            for msg in messages:
+                subject = msg.get("subject", "")
+                if subject_contains.lower() in subject.lower():
+                    detail_resp = requests.get(
+                        f"{BASE_URL}/messages/{msg['id']}",
+                        headers=auth_headers,
+                        timeout=15,
+                    )
+                    detail_resp.raise_for_status()
+                    log.info(f"[tempmail] Email ditemukan: {subject}")
+                    return detail_resp.json()
+
+            # Fallback: ambil email baru apapun yang belum dilihat
+            for msg in messages:
+                msg_id = msg.get("id")
+                if msg_id and msg_id not in seen_ids:
+                    seen_ids.add(msg_id)
+                    subject = msg.get("subject", "")
+                    # Filter hanya email dari cloudflare.com
+                    from_addr = str(msg.get("from", {}).get("address", ""))
+                    if "cloudflare" in from_addr.lower() or "cloudflare" in subject.lower():
+                        detail_resp = requests.get(
+                            f"{BASE_URL}/messages/{msg_id}",
+                            headers=auth_headers,
+                            timeout=15,
+                        )
+                        detail_resp.raise_for_status()
+                        log.info(f"[tempmail] Email Cloudflare ditemukan: {subject}")
+                        return detail_resp.json()
+
+        except Exception as e:
+            log.warning(f"[tempmail] Error polling inbox: {e}")
 
         time.sleep(interval)
 

@@ -174,7 +174,36 @@ def run_one(worker_id: int, email: str, password: str, mode: str = "google", tm_
             cf_api.wait_for_dashboard_session(page)
 
         else:
-            # ── Mode Tempmail ────────────────────────────────────────────────
+            # ── Mode Tempmail — generate email lazy di dalam worker ──────────
+            try:
+                _set_worker(worker_id, "generating...", "login")
+                provider = config.TEMPMAIL_PROVIDER
+
+                if provider == "mailsac":
+                    # Mailsac: tidak perlu register akun, langsung pakai email random
+                    from email_providers import mailsac_provider
+                    tm       = mailsac_provider.create_account(config.MAILSAC_API_KEY)
+                    email    = tm["email"]
+                    password = tm["password"]
+                    tm_token = None
+                else:
+                    # mail.tm: perlu buat akun dulu
+                    tm       = tempmail_provider.create_account()
+                    email    = tm["email"]
+                    password = tm["password"]
+                    tm_token = tm["token"]
+
+                result["email"]    = email
+                result["password"] = password
+                _set_worker(worker_id, email, "login")
+                log.info(f"[W{worker_id}] Tempmail dibuat [{provider}]: {email}")
+            except Exception as e:
+                result["reason"] = f"gagal generate tempmail: {e}"
+                _add_log(f"[red]✗[/red]  tempmail → generate gagal")
+                _set_worker(worker_id, "—", "failed")
+                return result
+
+            # Register via form
             ok = register_mod.register_tempmail(page, email, password)
             if not ok:
                 result["reason"] = "register form gagal"
@@ -182,9 +211,14 @@ def run_one(worker_id: int, email: str, password: str, mode: str = "google", tm_
                 _set_worker(worker_id, email, "failed")
                 return result
 
-            # Verifikasi email via mail.tm
+            # Verifikasi email
             _set_worker(worker_id, email, "verify")
-            verified = verify_mod.verify_email(page, email_mode="tempmail", tm_token=tm_token)
+            verified = verify_mod.verify_email(
+                page,
+                email_mode="tempmail",
+                tm_token=tm_token,
+                email=email,
+            )
             if not verified:
                 result["reason"] = "verifikasi email gagal"
                 _add_log(f"[red]✗[/red]  {email} → verifikasi gagal")
@@ -407,25 +441,17 @@ def apply_args(args):
 
 
 def _prepare_accounts(args) -> list[dict]:
-    """Siapkan list akun sesuai mode."""
+    """
+    Siapkan list akun sesuai mode.
+    Mode tempmail: buat placeholder — email di-generate lazy di dalam worker.
+    Mode google: baca dari file.
+    """
     if args.mode == "tempmail":
-        console.print(f"[cyan]Generating {args.count} temp email(s) via mail.tm...[/cyan]")
-        accounts = []
-        for i in range(args.count):
-            try:
-                tm = tempmail_provider.create_account()
-                accounts.append({
-                    "email":    tm["email"],
-                    "password": tm["password"],
-                    "tm_token": tm["token"],
-                    "mode":     "tempmail",
-                })
-                console.print(f"  [green]✓[/green] {tm['email']}")
-            except Exception as e:
-                console.print(f"  [red]✗[/red] Gagal generate email ke-{i+1}: {e}")
-        return accounts
+        # Buat placeholder — email akan di-generate di dalam worker saat dibutuhkan
+        # Ini hindari generate semua di awal (lebih cepat + tidak kena rate limit)
+        return [{"email": f"__tempmail_{i}__", "password": "", "mode": "tempmail", "tm_token": None}
+                for i in range(args.count)]
     else:
-        # Mode google — baca dari file
         try:
             raw = file_provider.load_emails(args.file)
             return [{"email": a["email"], "password": a["password"], "mode": "google", "tm_token": None}
@@ -441,11 +467,20 @@ def main():
     args = parse_args()
     apply_args(args)
 
-    workers = config.CONCURRENCY
-    mode    = args.mode
+    workers  = config.CONCURRENCY
+    mode     = args.mode
+    provider = config.TEMPMAIL_PROVIDER if mode == "tempmail" else "-"
+
+    # Validasi Mailsac API key kalau mode tempmail + provider mailsac
+    if mode == "tempmail" and provider == "mailsac" and not config.MAILSAC_API_KEY:
+        console.print("[red]❌  MAILSAC_API_KEY belum di-set![/red]")
+        console.print("[dim]    Daftar di https://mailsac.com lalu set di .env:[/dim]")
+        console.print("[dim]    MAILSAC_API_KEY=your_api_key[/dim]")
+        sys.exit(1)
 
     console.print(Panel(
         f"[cyan]Mode     :[/cyan] [bold]{mode}[/bold]\n"
+        + (f"[cyan]Provider :[/cyan] {provider}\n" if mode == "tempmail" else "")
         + (f"[cyan]File     :[/cyan] {config.EMAIL_FILE}\n" if mode == "google" else f"[cyan]Count    :[/cyan] {args.count} akun\n")
         + f"[cyan]Workers  :[/cyan] {workers}\n"
         f"[cyan]Headless :[/cyan] {config.HEADLESS}\n"
@@ -462,7 +497,7 @@ def main():
         sys.exit(1)
 
     console.print(f"\n[green]✓[/green] [bold]{len(accounts)}[/bold] akun siap diproses\n")
-    log.info(f"Memulai: {len(accounts)} akun, {workers} workers, mode={mode}")
+    log.info(f"Memulai: {len(accounts)} akun, {workers} workers, mode={mode}, provider={provider}")
 
     run_parallel(accounts, workers)
 

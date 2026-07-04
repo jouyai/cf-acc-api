@@ -36,5 +36,10 @@ PAGE_TIMEOUT = int(os.getenv("PAGE_TIMEOUT", "60"))          # timeout navigasi 
 EMAIL_POLL_TIMEOUT = int(os.getenv("EMAIL_POLL_TIMEOUT", "120"))  # max tunggu email verifikasi
 EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "5"))  # interval cek inbox
 
-# --- License CloakBrowser (opsional, untuk binary Pro) ---
-CLOAKBROWSER_LICENSE_KEY = os.getenv("CLOAKBROWSER_LICENSE_KEY", None)
+# --- Email Provider ---
+# Tempmail provider: "mailtm" atau "mailsac"
+TEMPMAIL_PROVIDER = os.getenv("TEMPMAIL_PROVIDER", "mailsac")
+
+# Mailsac API key (wajib untuk mode tempmail dengan provider mailsac)
+# Daftar di https://mailsac.com dan ambil API key
+MAILSAC_API_KEY = os.getenv("MAILSAC_API_KEY", "")
