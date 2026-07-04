@@ -38,15 +38,17 @@ def _build_chromium_args() -> list[str]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def new_browser():
+def new_browser(proxy: str | None = None):
     """
     Buat Playwright + browser instance baru.
-    Dipanggil sekali per akun, di-close setelah akun selesai.
+    
+    Args:
+        proxy: proxy URL override per-akun (e.g. "http://user:pass@host:port")
+               Kalau None, pakai config.PROXY global.
+    
     Returns (pw, browser, context, page).
     """
     import asyncio
-    # Pastikan thread ini punya event loop baru yang bersih
-    # Fix "Playwright Sync API inside the asyncio loop" di worker threads
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -57,12 +59,16 @@ def new_browser():
     binary = _get_binary()
     args   = _build_chromium_args()
 
+    # Prioritas: proxy argumen > config.PROXY global
+    active_proxy = proxy or config.PROXY
+    proxy_opts   = {"server": active_proxy} if active_proxy else None
+
     pw      = sync_playwright().start()
     browser = pw.chromium.launch(
         executable_path=binary,
         headless=config.HEADLESS,
         args=args,
-        proxy={"server": config.PROXY} if config.PROXY else None,
+        proxy=proxy_opts,
     )
     context = browser.new_context(
         viewport={"width": 1366, "height": 768},

@@ -34,3 +34,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Proxy list (mungkin berisi data sensitif)
+proxies.txt

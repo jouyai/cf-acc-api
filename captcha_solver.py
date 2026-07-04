@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 CAPSOLVER_API = "https://api.capsolver.com"
 
 CF_SIGNUP_URL    = "https://dash.cloudflare.com/sign-up"
-CF_TURNSTILE_KEY = "0x4AAAAAABDnPIDROrmt1Wwj"  # sitekey Cloudflare sign-up
+CF_TURNSTILE_KEY = "0x4AAAAAAAJel0iaAR3mgkjp"  # sitekey Cloudflare sign-up (verified)
 
 
 def _create_and_poll(api_key: str, task: dict, max_wait: int = 120) -> dict | None:

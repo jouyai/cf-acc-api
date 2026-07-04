@@ -336,64 +336,90 @@ def register_tempmail(page, email: str, password: str) -> bool:
             except Exception:
                 pass
 
-        # ── Solve CF Challenge via CapSolver kalau ada API key ───────────────
+        # ── Solve Turnstile via CapSolver ────────────────────────────────────
         if config.CAPSOLVER_API_KEY:
-            log.info("[register] Solving CF Challenge via CapSolver...")
+            log.info("[register] Solving Turnstile via CapSolver...")
             try:
-                from captcha_solver import solve_cf_challenge, inject_cf_cookies, solve_turnstile
-                # Coba AntiCloudflareTask dulu (untuk challenge-platform)
-                solution = solve_cf_challenge(
+                from captcha_solver import solve_turnstile
+                token = solve_turnstile(
                     api_key=config.CAPSOLVER_API_KEY,
                     url=SIGNUP_FORM_URL,
                 )
-                if solution:
-                    # Inject cookies hasil solve ke browser
-                    inject_cf_cookies(page, solution)
-                    # Reload halaman dengan cookies baru
-                    page.reload(wait_until="domcontentloaded")
-                    _d(1.0, 1.5)
-                    # Re-isi form setelah reload
+                if token:
+                    # Klik submit dulu untuk trigger Turnstile widget render
+                    submit_btn = page.locator('button[type="submit"]').first
+                    submit_btn.click()
+                    _d(1.5, 2.5)
+
+                    # Inject token setelah widget render
+                    injected = page.evaluate(f"""
+                        () => {{
+                            let count = 0;
+                            // Cari semua input cf-turnstile-response yang mungkin muncul
+                            document.querySelectorAll(
+                                '[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+                            ).forEach(el => {{ el.value = "{token}"; count++; }});
+
+                            // Trigger via turnstile widget callback langsung
+                            if (window.turnstile) {{
+                                try {{
+                                    // Cari widget ID dari DOM
+                                    const widgets = document.querySelectorAll('iframe[src*="turnstile"]');
+                                    widgets.forEach(w => {{
+                                        const widgetId = w.getAttribute('data-widget-id');
+                                        if (widgetId) {{
+                                            try {{ window.turnstile.execute(widgetId); }} catch(e) {{}}
+                                        }}
+                                    }});
+                                }} catch(e) {{}}
+                            }}
+
+                            // Inject via global __cfTurnstileCallback__
+                            const keys = Object.keys(window).filter(k =>
+                                k.startsWith('cf_') || k.includes('turnstile') || k.includes('Turnstile')
+                            );
+                            keys.forEach(k => {{
+                                try {{
+                                    if (typeof window[k] === 'function') {{
+                                        window[k]("{token}");
+                                        count++;
+                                    }}
+                                }} catch(e) {{}}
+                            }});
+
+                            return {{count, keys}};
+                        }}
+                    """)
+                    log.info(f"[register] Turnstile inject result: {injected}")
+                    _d(0.5, 1.0)
+
+                    # Submit sekali lagi setelah inject
                     try:
-                        ef = page.locator('input[name="email"], input[type="email"]').first
-                        ef.wait_for(state="visible", timeout=10000)
-                        _type_fast(ef, email)
-                        _d(0.2, 0.3)
-                        pf = page.locator('input[name="password"], input[type="password"]').first
-                        pf.wait_for(state="visible", timeout=5000)
-                        _type_fast(pf, password)
-                        _d(0.2, 0.3)
+                        submit_btn2 = page.locator('button[type="submit"]').first
+                        if submit_btn2.is_visible():
+                            submit_btn2.click()
+                            _d(0.5, 1.0)
                     except Exception:
                         pass
-                    log.info("[register] CF Challenge solved, cookies injected.")
                 else:
-                    # Fallback: coba Turnstile solver
-                    token = solve_turnstile(
-                        api_key=config.CAPSOLVER_API_KEY,
-                        url=SIGNUP_FORM_URL,
-                    )
-                    if token:
-                        page.evaluate(f"""
-                            () => {{
-                                document.querySelectorAll('[name="cf-turnstile-response"]')
-                                    .forEach(el => el.value = "{token}");
-                                if (window.turnstile) window.turnstile.execute();
-                            }}
-                        """)
-                        log.info("[register] Turnstile token injected.")
-                        _d(0.5, 1.0)
-                    else:
-                        log.warning("[register] CapSolver gagal, lanjut tanpa solve")
+                    log.warning("[register] CapSolver gagal dapat token, lanjut tanpa solve")
+                    # Submit tanpa token — mungkin browser fingerprint cukup
+                    submit_btn = page.locator('button[type="submit"]').first
+                    submit_btn.click()
+                    _d(1.0, 2.0)
             except Exception as e:
-                log.warning(f"[register] CapSolver exception: {e}, lanjut tanpa solve")
-
-        # Submit
-        submit = page.locator(
-            'button[type="submit"], button:has-text("Sign up"), '
-            'button:has-text("Create Account")'
-        ).first
-        submit.wait_for(state="visible", timeout=10000)
-        _d(0.5, 1.0)
-        submit.click()
+                log.warning(f"[register] CapSolver exception: {e}")
+                # Tetap submit
+                try:
+                    page.locator('button[type="submit"]').first.click()
+                except Exception:
+                    pass
+        else:
+            # Tidak ada CapSolver — langsung submit
+            submit_btn = page.locator('button[type="submit"]').first
+            submit_btn.wait_for(state="visible", timeout=10000)
+            _d(0.5, 1.0)
+            submit_btn.click()
 
         # Tunggu redirect ke halaman verifikasi email
         try:

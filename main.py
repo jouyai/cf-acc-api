@@ -33,6 +33,7 @@ import get_apikey as apikey_mod
 import cloudflare_api as cf_api
 import storage
 import verify_email as verify_mod
+import proxy_manager
 from email_providers import file_provider, tempmail_provider
 
 # ── Logging: file only (Rich handles stdout) ──────────────────────────────────
@@ -145,7 +146,7 @@ def _build_layout(total: int, workers: int, progress: Progress, counters: list) 
 
 # ── Worker function ───────────────────────────────────────────────────────────
 
-def run_one(worker_id: int, email: str, password: str, mode: str = "google", tm_token: str | None = None) -> dict:
+def run_one(worker_id: int, email: str, password: str, mode: str = "google", tm_token: str | None = None, proxy: str | None = None) -> dict:
     result = {
         "email":      email,
         "password":   password,
@@ -157,9 +158,9 @@ def run_one(worker_id: int, email: str, password: str, mode: str = "google", tm_
     b, pw = None, None
     try:
         _set_worker(worker_id, email, "login")
-        log.info(f"[W{worker_id}] Memulai [{mode}]: {email}")
+        log.info(f"[W{worker_id}] Memulai [{mode}]{' via proxy' if proxy else ''}: {email}")
 
-        pw, b, ctx, page = browser_mod.new_browser()
+        pw, b, ctx, page = browser_mod.new_browser(proxy=proxy)
 
         if mode == "google":
             # ── Mode Google OAuth ────────────────────────────────────────────
@@ -323,12 +324,18 @@ def run_parallel(accounts: list[dict], workers: int):
             except queue.Empty:
                 break
 
+            # Ambil proxy — dari akun atau rotasi dari proxy_manager
+            proxy = acc.get("proxy")
+            if not proxy and proxy_manager.has_proxies():
+                proxy = proxy_manager.get_next()
+
             result = run_one(
                 wid,
                 acc["email"],
                 acc["password"],
                 mode=acc.get("mode", "google"),
                 tm_token=acc.get("tm_token"),
+                proxy=proxy,
             )
 
             with _lock:
@@ -403,33 +410,40 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Contoh:
-  # Mode Google OAuth (pakai akun Gmail/GSuite dari file)
+  # Mode Google OAuth
   python main.py --mode google --file emails.txt
   python main.py --mode google --file emails.txt --workers 3
 
-  # Mode Tempmail (generate akun baru otomatis)
-  python main.py --mode tempmail --count 10
-  python main.py --mode tempmail --count 50 --workers 3
+  # Mode Tempmail dengan proxy
+  python main.py --mode tempmail --count 10 --proxy-file proxies.txt
+  python main.py --mode tempmail --count 50 --workers 3 --proxy-file proxies.txt
 
   # Debug
   python main.py --mode google --file emails.txt --no-headless
         """,
     )
-    parser.add_argument("--mode", choices=["google", "tempmail"], default="google",
-                        help="Mode: 'google' (akun Gmail dari file) atau 'tempmail' (generate akun baru)")
-    parser.add_argument("--file",        metavar="PATH", default=config.EMAIL_FILE,
+    parser.add_argument("--mode",       choices=["google", "tempmail"], default="google",
+                        help="Mode: 'google' atau 'tempmail'")
+    parser.add_argument("--file",       metavar="PATH", default=config.EMAIL_FILE,
                         help=f"File email:password untuk mode google (default: {config.EMAIL_FILE})")
-    parser.add_argument("--count",       metavar="N",    type=int, default=1,
-                        help="Jumlah akun yang dibuat untuk mode tempmail (default: 1)")
-    parser.add_argument("--workers",     metavar="N",    type=int, default=config.CONCURRENCY,
+    parser.add_argument("--count",      metavar="N",    type=int, default=1,
+                        help="Jumlah akun untuk mode tempmail (default: 1)")
+    parser.add_argument("--workers",    metavar="N",    type=int, default=config.CONCURRENCY,
                         help=f"Jumlah browser parallel (default: {config.CONCURRENCY})")
-    parser.add_argument("--proxy",       metavar="URL",
-                        help="Proxy URL: http://user:pass@host:port")
+    parser.add_argument("--proxy",      metavar="URL",
+                        help="Single proxy URL: http://user:pass@host:port")
+    parser.add_argument("--proxy-file", metavar="PATH",
+                        help="File list proxy (satu per baris), dirotasi per akun")
     parser.add_argument("--no-headless", action="store_true",
                         help="Tampilkan browser (untuk debug)")
-    parser.add_argument("--output",      metavar="PATH",
+    parser.add_argument("--output",     metavar="PATH",
                         help=f"Output CSV (default: {config.OUTPUT_FILE})")
     return parser.parse_args()
+
+
+def apply_args(args):
+    if args.proxy:       config.PROXY       = args.proxy
+    if args.no_headless: config.HEADLESS    = False
 
 
 def apply_args(args):
@@ -471,6 +485,13 @@ def main():
     mode     = args.mode
     provider = config.TEMPMAIL_PROVIDER if mode == "tempmail" else "-"
 
+    # Load proxy file kalau ada
+    proxy_count = 0
+    if hasattr(args, 'proxy_file') and args.proxy_file:
+        proxy_count = proxy_manager.load_proxies(args.proxy_file)
+        if proxy_count == 0:
+            console.print(f"[yellow]⚠  Proxy file kosong atau tidak ditemukan: {args.proxy_file}[/yellow]")
+
     # Validasi Mailsac API key kalau mode tempmail + provider mailsac
     if mode == "tempmail" and provider == "mailsac" and not config.MAILSAC_API_KEY:
         console.print("[red]❌  MAILSAC_API_KEY belum di-set![/red]")
@@ -478,13 +499,20 @@ def main():
         console.print("[dim]    MAILSAC_API_KEY=your_api_key[/dim]")
         sys.exit(1)
 
+    # Warn kalau mode tempmail tapi tidak ada proxy
+    if mode == "tempmail" and proxy_count == 0 and not config.PROXY:
+        console.print("[yellow]⚠  Mode tempmail tanpa proxy — bisa kena rate limit Cloudflare per IP[/yellow]")
+        console.print("[dim]    Gunakan --proxy-file proxies.txt untuk rotasi proxy[/dim]")
+
+    proxy_info = f"{proxy_count} proxies dari {args.proxy_file}" if proxy_count > 0 else (config.PROXY or "tidak dipakai")
+
     console.print(Panel(
         f"[cyan]Mode     :[/cyan] [bold]{mode}[/bold]\n"
         + (f"[cyan]Provider :[/cyan] {provider}\n" if mode == "tempmail" else "")
         + (f"[cyan]File     :[/cyan] {config.EMAIL_FILE}\n" if mode == "google" else f"[cyan]Count    :[/cyan] {args.count} akun\n")
         + f"[cyan]Workers  :[/cyan] {workers}\n"
         f"[cyan]Headless :[/cyan] {config.HEADLESS}\n"
-        f"[cyan]Proxy    :[/cyan] {config.PROXY or 'tidak dipakai'}\n"
+        f"[cyan]Proxy    :[/cyan] {proxy_info}\n"
         f"[cyan]Output   :[/cyan] {config.OUTPUT_FILE}",
         title="[bold cyan]Cloudflare Workers AI — Auto Register Tool[/bold cyan]",
         style="cyan",
@@ -497,7 +525,7 @@ def main():
         sys.exit(1)
 
     console.print(f"\n[green]✓[/green] [bold]{len(accounts)}[/bold] akun siap diproses\n")
-    log.info(f"Memulai: {len(accounts)} akun, {workers} workers, mode={mode}, provider={provider}")
+    log.info(f"Memulai: {len(accounts)} akun, {workers} workers, mode={mode}, provider={provider}, proxies={proxy_count}")
 
     run_parallel(accounts, workers)
 
