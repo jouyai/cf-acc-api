@@ -304,6 +304,7 @@ def register_tempmail(page, email: str, password: str) -> bool:
 
     Returns True kalau form berhasil disubmit (masih perlu verifikasi email).
     """
+    import config
     try:
         log.info(f"[register] Form register untuk: {email}")
         page.goto(SIGNUP_FORM_URL, wait_until="domcontentloaded")
@@ -335,6 +336,43 @@ def register_tempmail(page, email: str, password: str) -> bool:
             except Exception:
                 pass
 
+        # ── Solve Turnstile via CapSolver kalau ada API key ──────────────────
+        if config.CAPSOLVER_API_KEY:
+            log.info("[register] Solving Turnstile via CapSolver...")
+            try:
+                from captcha_solver import solve_turnstile
+                token = solve_turnstile(
+                    api_key=config.CAPSOLVER_API_KEY,
+                    url=SIGNUP_FORM_URL,
+                )
+                if token:
+                    # Inject token ke elemen Turnstile di halaman
+                    # Cloudflare Turnstile pakai input hidden dengan name "cf-turnstile-response"
+                    injected = page.evaluate(f"""
+                        () => {{
+                            // Cari input Turnstile dan set value
+                            const inputs = document.querySelectorAll(
+                                'input[name="cf-turnstile-response"], [name="cf-turnstile-response"]'
+                            );
+                            for (const inp of inputs) {{
+                                inp.value = "{token}";
+                            }}
+                            // Coba trigger callback Turnstile
+                            if (window.turnstile) {{
+                                window.turnstile.execute();
+                            }}
+                            // Coba set via global callback
+                            const callbacks = Object.keys(window).filter(k => k.startsWith('cf_'));
+                            return {{injected: inputs.length, token_len: {len(token)}}};
+                        }}
+                    """)
+                    log.info(f"[register] Turnstile token injected: {injected}")
+                    _d(0.5, 1.0)
+                else:
+                    log.warning("[register] CapSolver gagal dapat token, lanjut tanpa solve")
+            except Exception as e:
+                log.warning(f"[register] CapSolver exception: {e}, lanjut tanpa solve")
+
         # Submit
         submit = page.locator(
             'button[type="submit"], button:has-text("Sign up"), '
@@ -352,6 +390,10 @@ def register_tempmail(page, email: str, password: str) -> bool:
             )
         except Exception:
             pass
+
+        # Cek kalau masih di sign-up (CAPTCHA gagal)
+        if page.url == SIGNUP_FORM_URL or "sign-up" in page.url:
+            log.warning("[register] Masih di sign-up page — mungkin CAPTCHA tidak tersolve")
 
         log.info(f"[register] Form submitted. URL: {page.url}")
         return True
