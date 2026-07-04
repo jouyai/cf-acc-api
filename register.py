@@ -297,6 +297,26 @@ def register_account(page, context, email: str, password: str) -> bool:
 SIGNUP_FORM_URL = "https://dash.cloudflare.com/sign-up"
 
 
+def _dismiss_cookie_popup(page, timeout: int = 3000):
+    """Dismiss cookie consent popup Cloudflare kalau muncul."""
+    try:
+        for sel in [
+            'button:has-text("Accept All Cookies")',
+            'button:has-text("Accept All")',
+            'button:has-text("Reject All")',
+            '#onetrust-accept-btn-handler',
+            'button[id*="accept"]',
+        ]:
+            btn = page.locator(sel).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click()
+                log.info("[register] Cookie popup dismissed.")
+                _d(0.3, 0.5)
+                return
+    except Exception:
+        pass
+
+
 def register_tempmail(page, email: str, password: str, proxy: str | None = None) -> bool:
     """
     Register akun Cloudflare baru via form email+password.
@@ -322,6 +342,9 @@ def register_tempmail(page, email: str, password: str, proxy: str | None = None)
             t.start()
 
         page.goto(SIGNUP_FORM_URL, wait_until="domcontentloaded")
+
+        # Dismiss cookie consent popup kalau muncul
+        _dismiss_cookie_popup(page)
 
         # Tunggu form render
         email_field = page.locator('input[name="email"]').first
