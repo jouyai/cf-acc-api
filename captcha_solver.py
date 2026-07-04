@@ -1,6 +1,6 @@
-# captcha_solver.py — solve Cloudflare Turnstile via CapSolver API
+# captcha_solver.py — solve Cloudflare challenges via CapSolver API
 #
-# Dokumentasi: https://docs.capsolver.com/guide/captcha/Turnstile.html
+# Dokumentasi: https://docs.capsolver.com
 # Daftar di https://capsolver.com untuk dapat API key
 
 import time
@@ -11,29 +11,16 @@ log = logging.getLogger(__name__)
 
 CAPSOLVER_API = "https://api.capsolver.com"
 
-# Cloudflare sign-up Turnstile site key (tetap sama untuk semua user)
-CF_SIGNUP_URL     = "https://dash.cloudflare.com/sign-up"
-CF_TURNSTILE_KEY  = "0x4AAAAAAA-3X2SmBEn7SZiS"  # site key Cloudflare sign-up
+CF_SIGNUP_URL    = "https://dash.cloudflare.com/sign-up"
+CF_TURNSTILE_KEY = "0x4AAAAAABDnPIDROrmt1Wwj"  # sitekey Cloudflare sign-up
 
 
-def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_TURNSTILE_KEY) -> str | None:
-    """
-    Solve Cloudflare Turnstile via CapSolver.
-    Returns token string atau None kalau gagal.
-    """
+def _create_and_poll(api_key: str, task: dict, max_wait: int = 120) -> dict | None:
+    """Helper: buat task dan poll sampai selesai."""
     try:
-        # 1. Buat task
-        log.info("[capsolver] Membuat Turnstile task...")
         resp = requests.post(
             f"{CAPSOLVER_API}/createTask",
-            json={
-                "clientKey": api_key,
-                "task": {
-                    "type":    "AntiTurnstileTaskProxyLess",
-                    "websiteURL": url,
-                    "websiteKey": site_key,
-                },
-            },
+            json={"clientKey": api_key, "task": task},
             timeout=30,
         )
         resp.raise_for_status()
@@ -46,8 +33,7 @@ def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_T
         task_id = data.get("taskId")
         log.info(f"[capsolver] Task ID: {task_id}")
 
-        # 2. Poll hasil task
-        for _ in range(30):  # max 30 * 3s = 90 detik
+        for _ in range(max_wait // 3):
             time.sleep(3)
             result_resp = requests.post(
                 f"{CAPSOLVER_API}/getTaskResult",
@@ -59,13 +45,11 @@ def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_T
 
             status = result.get("status")
             if status == "ready":
-                token = result.get("solution", {}).get("token")
-                log.info(f"[capsolver] ✓ Turnstile solved: {token[:20]}...")
-                return token
+                log.info("[capsolver] ✓ Task solved!")
+                return result.get("solution", {})
             elif status == "failed":
                 log.error(f"[capsolver] Task failed: {result.get('errorDescription')}")
                 return None
-            # status == "processing" → lanjut polling
 
         log.error("[capsolver] Timeout menunggu solve result")
         return None
@@ -73,6 +57,57 @@ def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_T
     except Exception as e:
         log.error(f"[capsolver] Exception: {e}")
         return None
+
+
+def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_TURNSTILE_KEY) -> str | None:
+    """Solve Cloudflare Turnstile. Returns token atau None."""
+    log.info(f"[capsolver] Solving Turnstile untuk {url}...")
+    solution = _create_and_poll(api_key, {
+        "type":       "AntiTurnstileTaskProxyLess",
+        "websiteURL": url,
+        "websiteKey": site_key,
+    })
+    if solution:
+        token = solution.get("token")
+        if token:
+            log.info(f"[capsolver] ✓ Turnstile token: {token[:20]}...")
+        return token
+    return None
+
+
+def solve_cf_challenge(api_key: str, url: str = CF_SIGNUP_URL) -> dict | None:
+    """
+    Solve Cloudflare Bot Management / Challenge Platform.
+    Ini untuk halaman yang pakai challenge-platform bukan Turnstile widget biasa.
+    Returns dict dengan cookies atau None.
+    """
+    log.info(f"[capsolver] Solving CF Challenge untuk {url}...")
+    solution = _create_and_poll(api_key, {
+        "type":       "AntiCloudflareTask",
+        "websiteURL": url,
+        "proxy":      "",  # kosong = proxyless
+    })
+    if solution:
+        log.info(f"[capsolver] ✓ CF Challenge solved!")
+        return solution
+    return None
+
+
+def inject_cf_cookies(page, cookies: dict):
+    """Inject cookies hasil CF challenge solve ke browser."""
+    try:
+        cf_cookies = cookies.get("cookies", [])
+        if isinstance(cf_cookies, list):
+            for c in cf_cookies:
+                page.context.add_cookies([{
+                    "name":   c.get("name", ""),
+                    "value":  c.get("value", ""),
+                    "domain": ".cloudflare.com",
+                    "path":   "/",
+                }])
+        log.info(f"[capsolver] Injected {len(cf_cookies)} cookies")
+    except Exception as e:
+        log.warning(f"[capsolver] inject_cf_cookies: {e}")
 
 
 def get_balance(api_key: str) -> float | None:

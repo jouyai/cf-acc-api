@@ -336,40 +336,53 @@ def register_tempmail(page, email: str, password: str) -> bool:
             except Exception:
                 pass
 
-        # ── Solve Turnstile via CapSolver kalau ada API key ──────────────────
+        # ── Solve CF Challenge via CapSolver kalau ada API key ───────────────
         if config.CAPSOLVER_API_KEY:
-            log.info("[register] Solving Turnstile via CapSolver...")
+            log.info("[register] Solving CF Challenge via CapSolver...")
             try:
-                from captcha_solver import solve_turnstile
-                token = solve_turnstile(
+                from captcha_solver import solve_cf_challenge, inject_cf_cookies, solve_turnstile
+                # Coba AntiCloudflareTask dulu (untuk challenge-platform)
+                solution = solve_cf_challenge(
                     api_key=config.CAPSOLVER_API_KEY,
                     url=SIGNUP_FORM_URL,
                 )
-                if token:
-                    # Inject token ke elemen Turnstile di halaman
-                    # Cloudflare Turnstile pakai input hidden dengan name "cf-turnstile-response"
-                    injected = page.evaluate(f"""
-                        () => {{
-                            // Cari input Turnstile dan set value
-                            const inputs = document.querySelectorAll(
-                                'input[name="cf-turnstile-response"], [name="cf-turnstile-response"]'
-                            );
-                            for (const inp of inputs) {{
-                                inp.value = "{token}";
-                            }}
-                            // Coba trigger callback Turnstile
-                            if (window.turnstile) {{
-                                window.turnstile.execute();
-                            }}
-                            // Coba set via global callback
-                            const callbacks = Object.keys(window).filter(k => k.startsWith('cf_'));
-                            return {{injected: inputs.length, token_len: {len(token)}}};
-                        }}
-                    """)
-                    log.info(f"[register] Turnstile token injected: {injected}")
-                    _d(0.5, 1.0)
+                if solution:
+                    # Inject cookies hasil solve ke browser
+                    inject_cf_cookies(page, solution)
+                    # Reload halaman dengan cookies baru
+                    page.reload(wait_until="domcontentloaded")
+                    _d(1.0, 1.5)
+                    # Re-isi form setelah reload
+                    try:
+                        ef = page.locator('input[name="email"], input[type="email"]').first
+                        ef.wait_for(state="visible", timeout=10000)
+                        _type_fast(ef, email)
+                        _d(0.2, 0.3)
+                        pf = page.locator('input[name="password"], input[type="password"]').first
+                        pf.wait_for(state="visible", timeout=5000)
+                        _type_fast(pf, password)
+                        _d(0.2, 0.3)
+                    except Exception:
+                        pass
+                    log.info("[register] CF Challenge solved, cookies injected.")
                 else:
-                    log.warning("[register] CapSolver gagal dapat token, lanjut tanpa solve")
+                    # Fallback: coba Turnstile solver
+                    token = solve_turnstile(
+                        api_key=config.CAPSOLVER_API_KEY,
+                        url=SIGNUP_FORM_URL,
+                    )
+                    if token:
+                        page.evaluate(f"""
+                            () => {{
+                                document.querySelectorAll('[name="cf-turnstile-response"]')
+                                    .forEach(el => el.value = "{token}");
+                                if (window.turnstile) window.turnstile.execute();
+                            }}
+                        """)
+                        log.info("[register] Turnstile token injected.")
+                        _d(0.5, 1.0)
+                    else:
+                        log.warning("[register] CapSolver gagal, lanjut tanpa solve")
             except Exception as e:
                 log.warning(f"[register] CapSolver exception: {e}, lanjut tanpa solve")
 
