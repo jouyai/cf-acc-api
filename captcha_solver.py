@@ -59,20 +59,89 @@ def _create_and_poll(api_key: str, task: dict, max_wait: int = 120) -> dict | No
         return None
 
 
-def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_TURNSTILE_KEY) -> str | None:
-    """Solve Cloudflare Turnstile. Returns token atau None."""
-    log.info(f"[capsolver] Solving Turnstile untuk {url}...")
-    solution = _create_and_poll(api_key, {
-        "type":       "AntiTurnstileTaskProxyLess",
+def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_TURNSTILE_KEY, proxy: str | None = None) -> str | None:
+    """
+    Solve Cloudflare Turnstile.
+    
+    PENTING: Kalau pakai proxy di browser, proxy yang sama harus dipakai di sini
+    agar token di-bind ke IP yang sama dengan yang submit form.
+    
+    Args:
+        proxy: format "http://user:pass@host:port" atau "socks5://..."
+    """
+    log.info(f"[capsolver] Solving Turnstile untuk {url}{'  via proxy' if proxy else ''}...")
+
+    task: dict = {
         "websiteURL": url,
         "websiteKey": site_key,
-    })
+    }
+
+    if proxy:
+        # Pakai proxy — token akan di-bind ke IP proxy
+        task["type"] = "TurnstileTask"
+        # Parse proxy ke format CapSolver
+        proxy_data = _parse_proxy(proxy)
+        if proxy_data:
+            task.update(proxy_data)
+        else:
+            # Fallback ke proxyless kalau proxy tidak valid
+            task["type"] = "AntiTurnstileTaskProxyLess"
+    else:
+        task["type"] = "AntiTurnstileTaskProxyLess"
+
+    solution = _create_and_poll(api_key, task)
     if solution:
         token = solution.get("token")
         if token:
             log.info(f"[capsolver] ✓ Turnstile token: {token[:20]}...")
         return token
     return None
+
+
+def _parse_proxy(proxy: str) -> dict | None:
+    """
+    Parse proxy URL ke format CapSolver.
+    Input:  http://user:pass@host:port
+    Output: {proxyType, proxyAddress, proxyPort, proxyLogin, proxyPassword}
+    """
+    import re
+    try:
+        # Detect proxy type
+        if proxy.startswith("socks5://"):
+            proxy_type = "socks5"
+            proxy = proxy[9:]
+        elif proxy.startswith("socks4://"):
+            proxy_type = "socks4"
+            proxy = proxy[9:]
+        else:
+            proxy_type = "http"
+            proxy = proxy.replace("http://", "").replace("https://", "")
+
+        # Parse user:pass@host:port
+        if "@" in proxy:
+            auth, hostport = proxy.rsplit("@", 1)
+            if ":" in auth:
+                login, password = auth.split(":", 1)
+            else:
+                login, password = auth, ""
+        else:
+            hostport = proxy
+            login, password = "", ""
+
+        host, port = hostport.rsplit(":", 1)
+
+        result = {
+            "proxyType":    proxy_type,
+            "proxyAddress": host,
+            "proxyPort":    int(port),
+        }
+        if login:
+            result["proxyLogin"]    = login
+            result["proxyPassword"] = password
+        return result
+    except Exception as e:
+        log.warning(f"[capsolver] Gagal parse proxy: {e}")
+        return None
 
 
 def solve_cf_challenge(api_key: str, url: str = CF_SIGNUP_URL) -> dict | None:

@@ -205,7 +205,7 @@ def run_one(worker_id: int, email: str, password: str, mode: str = "google", tm_
                 return result
 
             # Register via form
-            ok = register_mod.register_tempmail(page, email, password)
+            ok = register_mod.register_tempmail(page, email, password, proxy=proxy)
             if not ok:
                 result["reason"] = "register form gagal"
                 _add_log(f"[red]✗[/red]  {email} → register gagal")

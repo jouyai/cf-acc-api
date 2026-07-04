@@ -107,7 +107,7 @@ def scrape_and_filter(
     console.print(f"[dim]Testing {min(len(all_proxies), 500)} proxy (timeout {TEST_TIMEOUT}s)...[/dim]\n")
     
     # Batasi yang di-test agar tidak terlalu lama
-    test_batch = all_proxies[:500]
+    test_batch = all_proxies[:1000]
     live_proxies = []
 
     with Progress(

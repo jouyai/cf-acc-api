@@ -297,23 +297,27 @@ def register_account(page, context, email: str, password: str) -> bool:
 SIGNUP_FORM_URL = "https://dash.cloudflare.com/sign-up"
 
 
-def register_tempmail(page, email: str, password: str) -> bool:
+def register_tempmail(page, email: str, password: str, proxy: str | None = None) -> bool:
     """
     Register akun Cloudflare baru via form email+password.
-    Solve Turnstile via CapSolver lalu inject token via turnstile.render callback.
+    Solve Turnstile via CapSolver dengan proxy yang sama agar token valid.
     """
     import config
     try:
         log.info(f"[register] Form register untuk: {email}")
 
         # Solve Turnstile SEBELUM buka halaman (parallel dengan load)
+        # PENTING: pass proxy yang sama agar token di-bind ke IP yang sama
         token = None
         if config.CAPSOLVER_API_KEY:
             import threading
             from captcha_solver import solve_turnstile
             token_holder = [None]
             def _solve():
-                token_holder[0] = solve_turnstile(api_key=config.CAPSOLVER_API_KEY)
+                token_holder[0] = solve_turnstile(
+                    api_key=config.CAPSOLVER_API_KEY,
+                    proxy=proxy,  # pass proxy agar IP match
+                )
             t = threading.Thread(target=_solve, daemon=True)
             t.start()
 
