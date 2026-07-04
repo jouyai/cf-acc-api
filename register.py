@@ -406,9 +406,10 @@ def register_tempmail(page, email: str, password: str, proxy: str | None = None)
             except Exception:
                 body = ""
 
-            # Rate limit / IP block — tidak bisa di-retry dengan email sama
+            # Rate limit / IP block — tunggu sebentar lalu retry
             if "unable" in body.lower() and "sign up" in body.lower():
-                log.error("[register] IP/rate limit block dari Cloudflare")
+                log.error("[register] IP rate limit — tunggu sebelum retry")
+                _d(10.0, 20.0)  # tunggu 10-20 detik sebelum retry
                 return False
 
             # CAPTCHA masih muncul — tunggu auto-solve atau submit ulang
