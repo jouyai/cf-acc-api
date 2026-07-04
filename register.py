@@ -290,3 +290,72 @@ def register_account(page, context, email: str, password: str) -> bool:
     except Exception as e:
         log.error(f"[register] Exception: {e}")
         return False
+
+
+# ── Tempmail registration flow ────────────────────────────────────────────────
+
+SIGNUP_FORM_URL = "https://dash.cloudflare.com/sign-up"
+
+
+def register_tempmail(page, email: str, password: str) -> bool:
+    """
+    Register akun Cloudflare baru via form email+password biasa.
+    Dipakai untuk akun tempmail (bukan Google OAuth).
+
+    Returns True kalau form berhasil disubmit (masih perlu verifikasi email).
+    """
+    try:
+        log.info(f"[register] Form register untuk: {email}")
+        page.goto(SIGNUP_FORM_URL, wait_until="domcontentloaded")
+        _d(1.0, 2.0)
+
+        # Isi email
+        email_field = page.locator('input[name="email"], input[type="email"]').first
+        email_field.wait_for(state="visible", timeout=20000)
+        _type_fast(email_field, email)
+        _d(0.3, 0.5)
+
+        # Isi password
+        pass_field = page.locator('input[name="password"], input[type="password"]').first
+        pass_field.wait_for(state="visible", timeout=10000)
+        _type_fast(pass_field, password)
+        _d(0.3, 0.5)
+
+        # Centang ToS kalau ada
+        for tos_sel in [
+            'input[type="checkbox"][name*="agree"]',
+            'input[type="checkbox"][id*="terms"]',
+            'input[type="checkbox"][id*="tos"]',
+        ]:
+            try:
+                cb = page.locator(tos_sel).first
+                if cb.count() > 0 and not cb.is_checked():
+                    cb.check()
+                    _d(0.2, 0.4)
+            except Exception:
+                pass
+
+        # Submit
+        submit = page.locator(
+            'button[type="submit"], button:has-text("Sign up"), '
+            'button:has-text("Create Account")'
+        ).first
+        submit.wait_for(state="visible", timeout=10000)
+        _d(0.5, 1.0)
+        submit.click()
+
+        # Tunggu redirect ke halaman verifikasi email
+        try:
+            page.wait_for_url(
+                lambda url: "verify" in url or "email" in url or url != SIGNUP_FORM_URL,
+                timeout=20000,
+            )
+        except Exception:
+            pass
+
+        log.info(f"[register] Form submitted. URL: {page.url}")
+        return True
+
+    except Exception as e:
+        log.error(f"[register] register_tempmail exception: {e}")
+        return False

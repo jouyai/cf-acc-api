@@ -32,7 +32,8 @@ import register as register_mod
 import get_apikey as apikey_mod
 import cloudflare_api as cf_api
 import storage
-from email_providers import file_provider
+import verify_email as verify_mod
+from email_providers import file_provider, tempmail_provider
 
 # ── Logging: file only (Rich handles stdout) ──────────────────────────────────
 os.makedirs("results", exist_ok=True)
@@ -85,6 +86,7 @@ def _build_worker_table(workers: int) -> Table:
         "login":   "[yellow]🔄 login...[/yellow]",
         "account": "[yellow]🔄 account id[/yellow]",
         "token":   "[yellow]🔄 buat token[/yellow]",
+        "verify":  "[yellow]🔄 verifikasi[/yellow]",
         "success": "[green]✓  sukses[/green]",
         "failed":  "[red]✗  gagal[/red]",
         "waiting": "[dim]⏳ menunggu[/dim]",
@@ -143,7 +145,7 @@ def _build_layout(total: int, workers: int, progress: Progress, counters: list) 
 
 # ── Worker function ───────────────────────────────────────────────────────────
 
-def run_one(worker_id: int, email: str, password: str) -> dict:
+def run_one(worker_id: int, email: str, password: str, mode: str = "google", tm_token: str | None = None) -> dict:
     result = {
         "email":      email,
         "password":   password,
@@ -155,45 +157,61 @@ def run_one(worker_id: int, email: str, password: str) -> dict:
     b, pw = None, None
     try:
         _set_worker(worker_id, email, "login")
-        log.info(f"[W{worker_id}] Memulai: {email}")
+        log.info(f"[W{worker_id}] Memulai [{mode}]: {email}")
 
         pw, b, ctx, page = browser_mod.new_browser()
 
-        # 1. Login Google OAuth via browser
-        ok = register_mod.register_account(page, ctx, email, password)
-        if not ok:
-            result["reason"] = "login Google gagal"
-            _add_log(f"[red]✗[/red]  {email} → login gagal")
-            log.error(f"[W{worker_id}] Login gagal: {email}")
-            _set_worker(worker_id, email, "failed")
-            return result
+        if mode == "google":
+            # ── Mode Google OAuth ────────────────────────────────────────────
+            ok = register_mod.register_account(page, ctx, email, password)
+            if not ok:
+                result["reason"] = "login Google gagal"
+                _add_log(f"[red]✗[/red]  {email} → login gagal")
+                _set_worker(worker_id, email, "failed")
+                return result
 
-        # 2. Tunggu dashboard fully loaded agar semua cookies ter-set
-        _set_worker(worker_id, email, "account")
-        cf_api.wait_for_dashboard_session(page)
+            _set_worker(worker_id, email, "account")
+            cf_api.wait_for_dashboard_session(page)
 
-        # 3. Extract cookies dari browser
+        else:
+            # ── Mode Tempmail ────────────────────────────────────────────────
+            ok = register_mod.register_tempmail(page, email, password)
+            if not ok:
+                result["reason"] = "register form gagal"
+                _add_log(f"[red]✗[/red]  {email} → register gagal")
+                _set_worker(worker_id, email, "failed")
+                return result
+
+            # Verifikasi email via mail.tm
+            _set_worker(worker_id, email, "verify")
+            verified = verify_mod.verify_email(page, email_mode="tempmail", tm_token=tm_token)
+            if not verified:
+                result["reason"] = "verifikasi email gagal"
+                _add_log(f"[red]✗[/red]  {email} → verifikasi gagal")
+                _set_worker(worker_id, email, "failed")
+                return result
+
+            _set_worker(worker_id, email, "account")
+
+        # ── Extract cookies + buat session ──────────────────────────────────
         cookies = cf_api.extract_cookies_from_browser(page)
         if not cookies:
             result["reason"] = "gagal extract cookies"
             _set_worker(worker_id, email, "failed")
             return result
 
-        # 4. Buat HTTP session dengan cookies — browser tidak dibutuhkan lagi
         session = cf_api.make_session(cookies)
 
-        # 5. Ambil Account ID via API (cepat, tanpa browser)
+        # ── Ambil Account ID ─────────────────────────────────────────────────
         account_id = cf_api.get_account_id(session)
         if not account_id:
-            # Fallback ke browser kalau API gagal
             account_id = apikey_mod.get_account_id(page)
 
-        # 6. Buat Workers AI token via API (cepat, tanpa browser)
+        # ── Buat Workers AI token ────────────────────────────────────────────
         _set_worker(worker_id, email, "token")
         token_name = f"wai-{email.split('@')[0][:12]}"
         api_token  = cf_api.create_workers_ai_token(session, account_id or "", token_name)
 
-        # Fallback ke browser kalau API gagal
         if not api_token:
             log.info(f"[W{worker_id}] API token gagal, fallback ke browser...")
             api_token = apikey_mod.create_workers_ai_token(page, token_name=token_name)
@@ -201,7 +219,6 @@ def run_one(worker_id: int, email: str, password: str) -> dict:
         if not api_token:
             result["reason"] = "gagal membuat api token"
             _add_log(f"[red]✗[/red]  {email} → gagal buat token")
-            log.error(f"[W{worker_id}] Gagal buat token: {email}")
             _set_worker(worker_id, email, "failed")
             return result
 
@@ -260,7 +277,7 @@ def run_parallel(accounts: list[dict], workers: int):
         acc_queue.put(acc)
 
     def worker_loop(wid: int):
-        # Stagger start agar tidak semua login Google bersamaan
+        # Stagger start agar tidak semua login bersamaan
         stagger = random.uniform(1.5, 3.0) * (wid - 1)
         if stagger > 0:
             _set_worker(wid, "—", "waiting")
@@ -272,7 +289,13 @@ def run_parallel(accounts: list[dict], workers: int):
             except queue.Empty:
                 break
 
-            result = run_one(wid, acc["email"], acc["password"])
+            result = run_one(
+                wid,
+                acc["email"],
+                acc["password"],
+                mode=acc.get("mode", "google"),
+                tm_token=acc.get("tm_token"),
+            )
 
             with _lock:
                 counters[0] += 1
@@ -342,18 +365,28 @@ def run_parallel(accounts: list[dict], workers: int):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Cloudflare Workers AI — auto login via Google & get API token",
+        description="Cloudflare Workers AI — auto register & get API token",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Contoh:
-  python main.py --file emails.txt
-  python main.py --file emails.txt --workers 3
-  python main.py --file emails.txt --workers 4 --no-headless
-  python main.py --file emails.txt --proxy http://user:pass@host:port
+  # Mode Google OAuth (pakai akun Gmail/GSuite dari file)
+  python main.py --mode google --file emails.txt
+  python main.py --mode google --file emails.txt --workers 3
+
+  # Mode Tempmail (generate akun baru otomatis)
+  python main.py --mode tempmail --count 10
+  python main.py --mode tempmail --count 50 --workers 3
+
+  # Debug
+  python main.py --mode google --file emails.txt --no-headless
         """,
     )
+    parser.add_argument("--mode", choices=["google", "tempmail"], default="google",
+                        help="Mode: 'google' (akun Gmail dari file) atau 'tempmail' (generate akun baru)")
     parser.add_argument("--file",        metavar="PATH", default=config.EMAIL_FILE,
-                        help=f"File email:password (default: {config.EMAIL_FILE})")
+                        help=f"File email:password untuk mode google (default: {config.EMAIL_FILE})")
+    parser.add_argument("--count",       metavar="N",    type=int, default=1,
+                        help="Jumlah akun yang dibuat untuk mode tempmail (default: 1)")
     parser.add_argument("--workers",     metavar="N",    type=int, default=config.CONCURRENCY,
                         help=f"Jumlah browser parallel (default: {config.CONCURRENCY})")
     parser.add_argument("--proxy",       metavar="URL",
@@ -373,6 +406,35 @@ def apply_args(args):
     if args.workers:     config.CONCURRENCY = args.workers
 
 
+def _prepare_accounts(args) -> list[dict]:
+    """Siapkan list akun sesuai mode."""
+    if args.mode == "tempmail":
+        console.print(f"[cyan]Generating {args.count} temp email(s) via mail.tm...[/cyan]")
+        accounts = []
+        for i in range(args.count):
+            try:
+                tm = tempmail_provider.create_account()
+                accounts.append({
+                    "email":    tm["email"],
+                    "password": tm["password"],
+                    "tm_token": tm["token"],
+                    "mode":     "tempmail",
+                })
+                console.print(f"  [green]✓[/green] {tm['email']}")
+            except Exception as e:
+                console.print(f"  [red]✗[/red] Gagal generate email ke-{i+1}: {e}")
+        return accounts
+    else:
+        # Mode google — baca dari file
+        try:
+            raw = file_provider.load_emails(args.file)
+            return [{"email": a["email"], "password": a["password"], "mode": "google", "tm_token": None}
+                    for a in raw]
+        except FileNotFoundError as e:
+            console.print(f"[red]❌  {e}[/red]")
+            sys.exit(1)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -380,10 +442,12 @@ def main():
     apply_args(args)
 
     workers = config.CONCURRENCY
+    mode    = args.mode
 
     console.print(Panel(
-        f"[cyan]File     :[/cyan] {config.EMAIL_FILE}\n"
-        f"[cyan]Workers  :[/cyan] {workers}\n"
+        f"[cyan]Mode     :[/cyan] [bold]{mode}[/bold]\n"
+        + (f"[cyan]File     :[/cyan] {config.EMAIL_FILE}\n" if mode == "google" else f"[cyan]Count    :[/cyan] {args.count} akun\n")
+        + f"[cyan]Workers  :[/cyan] {workers}\n"
         f"[cyan]Headless :[/cyan] {config.HEADLESS}\n"
         f"[cyan]Proxy    :[/cyan] {config.PROXY or 'tidak dipakai'}\n"
         f"[cyan]Output   :[/cyan] {config.OUTPUT_FILE}",
@@ -391,18 +455,14 @@ def main():
         style="cyan",
     ))
 
-    try:
-        accounts = file_provider.load_emails(config.EMAIL_FILE)
-    except FileNotFoundError as e:
-        console.print(f"[red]❌  {e}[/red]")
-        sys.exit(1)
+    accounts = _prepare_accounts(args)
 
     if not accounts:
-        console.print("[red]❌  File email kosong.[/red]")
+        console.print("[red]❌  Tidak ada akun yang bisa diproses.[/red]")
         sys.exit(1)
 
-    console.print(f"\n[green]✓[/green] [bold]{len(accounts)}[/bold] akun dimuat dari [cyan]{config.EMAIL_FILE}[/cyan]\n")
-    log.info(f"Memulai: {len(accounts)} akun, {workers} workers")
+    console.print(f"\n[green]✓[/green] [bold]{len(accounts)}[/bold] akun siap diproses\n")
+    log.info(f"Memulai: {len(accounts)} akun, {workers} workers, mode={mode}")
 
     run_parallel(accounts, workers)
 
