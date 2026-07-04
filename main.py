@@ -349,16 +349,18 @@ def run_parallel(accounts: list[dict], workers: int):
             # Retry loop — coba sampai sukses atau max retry habis
             retry = 0
             result = None
+            last_proxy = None
             while retry < MAX_RETRY:
                 # Ambil proxy baru setiap retry
                 proxy = acc.get("proxy")
                 if not proxy and proxy_manager.has_proxies():
                     proxy = proxy_manager.get_next()
+                last_proxy = proxy
 
                 if retry > 0:
                     log.info(f"[W{wid}] Retry #{retry}/{MAX_RETRY} proxy={proxy}")
                     _set_worker(wid, acc.get("email", "—"), "waiting")
-                    time.sleep(random.uniform(2.0, 4.0))
+                    time.sleep(random.uniform(1.0, 2.0))
 
                 result = run_one(
                     wid,
@@ -378,6 +380,11 @@ def run_parallel(accounts: list[dict], workers: int):
                 if not _is_retryable(reason):
                     log.error(f"[W{wid}] Fatal error, tidak retry: {reason[:80]}")
                     break
+
+                # Mark proxy dead kalau proxy error
+                if _is_proxy_error(reason) and last_proxy:
+                    proxy_manager.mark_dead(last_proxy)
+                    log.warning(f"[W{wid}] Proxy dead: {last_proxy}")
 
                 # Semua error lain → retry dengan proxy baru + email baru (tempmail)
                 log.warning(f"[W{wid}] Retry #{retry+1} karena: {reason[:60]}")

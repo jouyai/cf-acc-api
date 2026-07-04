@@ -9,17 +9,19 @@
 import random
 import threading
 import logging
+import requests
 
 log = logging.getLogger(__name__)
 
 _lock       = threading.Lock()
 _proxies    = []
+_dead       = set()  # proxy yang sudah terbukti mati
 _index      = 0
 
 
 def load_proxies(filepath: str) -> int:
     """Load proxy dari file. Return jumlah proxy yang berhasil di-load."""
-    global _proxies
+    global _proxies, _dead
     loaded = []
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -32,6 +34,7 @@ def load_proxies(filepath: str) -> int:
                     loaded.append(proxy)
         with _lock:
             _proxies = loaded
+            _dead    = set()
         log.info(f"[proxy] Loaded {len(loaded)} proxies dari {filepath}")
         return len(loaded)
     except FileNotFoundError:
@@ -40,58 +43,63 @@ def load_proxies(filepath: str) -> int:
 
 
 def _normalize(raw: str) -> str | None:
-    """
-    Normalisasi format proxy ke http://user:pass@host:port
-    Support format:
-      - http://user:pass@host:port
-      - socks5://host:port
-      - host:port:user:pass
-      - host:port
-    """
+    """Normalisasi format proxy ke http://user:pass@host:port"""
     raw = raw.strip()
     if not raw:
         return None
-
-    # Sudah dalam format URL
     if raw.startswith(("http://", "https://", "socks5://", "socks4://")):
         return raw
-
-    # Format host:port:user:pass
     parts = raw.split(":")
     if len(parts) == 4:
         host, port, user, passwd = parts
         return f"http://{user}:{passwd}@{host}:{port}"
-
-    # Format host:port
     if len(parts) == 2:
         return f"http://{raw}"
-
     return None
 
 
+def mark_dead(proxy: str):
+    """Tandai proxy sebagai mati agar tidak dipakai lagi."""
+    with _lock:
+        _dead.add(proxy)
+    log.debug(f"[proxy] Marked dead: {proxy}")
+
+
 def get_next() -> str | None:
-    """Ambil proxy berikutnya (round-robin)."""
+    """Ambil proxy berikutnya (round-robin), skip yang sudah mati."""
     global _index
     with _lock:
-        if not _proxies:
+        live = [p for p in _proxies if p not in _dead]
+        if not live:
+            # Semua mati — reset dan coba lagi
+            log.warning("[proxy] Semua proxy mati, reset dead list...")
+            _dead.clear()
+            live = list(_proxies)
+        if not live:
             return None
-        proxy = _proxies[_index % len(_proxies)]
+        proxy = live[_index % len(live)]
         _index += 1
         return proxy
 
 
 def get_random() -> str | None:
-    """Ambil proxy random."""
+    """Ambil proxy random dari yang masih hidup."""
     with _lock:
-        if not _proxies:
-            return None
-        return random.choice(_proxies)
+        live = [p for p in _proxies if p not in _dead]
+        if not live:
+            _dead.clear()
+            live = list(_proxies)
+        return random.choice(live) if live else None
 
 
 def count() -> int:
-    """Jumlah proxy yang tersedia."""
     with _lock:
         return len(_proxies)
+
+
+def live_count() -> int:
+    with _lock:
+        return len([p for p in _proxies if p not in _dead])
 
 
 def has_proxies() -> bool:
