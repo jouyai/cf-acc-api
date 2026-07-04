@@ -27,13 +27,21 @@ def _get_binary() -> str:
 
 
 def _build_chromium_args() -> list[str]:
-    return build_args(
+    args = build_args(
         stealth_args=True,
         extra_args=None,
         headless=config.HEADLESS,
         locale="en-US",
         timezone="America/New_York",
     )
+    # Ignore SSL errors — diperlukan untuk proxy publik yang intercept HTTPS
+    extra = [
+        "--ignore-certificate-errors",
+        "--ignore-ssl-errors",
+        "--ignore-certificate-errors-spki-list",
+        "--allow-insecure-localhost",
+    ]
+    return args + extra
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -75,6 +83,7 @@ def new_browser(proxy: str | None = None):
         locale="en-US",
         timezone_id="America/New_York",
         java_script_enabled=True,
+        ignore_https_errors=True,  # untuk proxy publik yang intercept HTTPS
     )
     context.set_default_timeout(config.PAGE_TIMEOUT * 1000)
     page = context.new_page()
