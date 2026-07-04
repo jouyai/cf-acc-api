@@ -297,22 +297,57 @@ def register_account(page, context, email: str, password: str) -> bool:
 SIGNUP_FORM_URL = "https://dash.cloudflare.com/sign-up"
 
 
-def _dismiss_cookie_popup(page, timeout: int = 3000):
-    """Dismiss cookie consent popup Cloudflare kalau muncul."""
+def _dismiss_cookie_popup(page, timeout: int = 5000):
+    """Dismiss cookie consent popup Cloudflare (OneTrust) kalau muncul."""
     try:
-        for sel in [
-            'button:has-text("Accept All Cookies")',
-            'button:has-text("Accept All")',
-            'button:has-text("Reject All")',
-            '#onetrust-accept-btn-handler',
-            'button[id*="accept"]',
-        ]:
+        # Tunggu popup muncul dulu
+        page.wait_for_selector(
+            '#onetrust-consent-sdk, #onetrust-banner-sdk, .onetrust-pc-dark-filter',
+            state="visible",
+            timeout=3000,
+        )
+    except Exception:
+        return  # popup tidak muncul, skip
+
+    # Klik Accept All
+    for sel in [
+        '#onetrust-accept-btn-handler',
+        'button:has-text("Accept All Cookies")',
+        'button:has-text("Accept All")',
+        'button:has-text("Reject All")',
+        '.onetrust-close-btn-handler',
+    ]:
+        try:
             btn = page.locator(sel).first
             if btn.count() > 0 and btn.is_visible():
                 btn.click()
                 log.info("[register] Cookie popup dismissed.")
-                _d(0.3, 0.5)
+                _d(0.5, 1.0)
+                # Tunggu overlay hilang
+                try:
+                    page.wait_for_selector(
+                        '.onetrust-pc-dark-filter',
+                        state="hidden",
+                        timeout=3000,
+                    )
+                except Exception:
+                    pass
                 return
+        except Exception:
+            pass
+
+    # Force remove via JS kalau tombol tidak bisa diklik
+    try:
+        page.evaluate("""
+            () => {
+                const sdk = document.getElementById('onetrust-consent-sdk');
+                if (sdk) sdk.remove();
+                document.querySelectorAll('.onetrust-pc-dark-filter, #onetrust-banner-sdk')
+                    .forEach(el => el.remove());
+            }
+        """)
+        log.info("[register] Cookie popup removed via JS.")
+        _d(0.3, 0.5)
     except Exception:
         pass
 

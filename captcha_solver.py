@@ -62,14 +62,9 @@ def _create_and_poll(api_key: str, task: dict, max_wait: int = 120) -> dict | No
 def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_TURNSTILE_KEY, proxy: str | None = None) -> str | None:
     """
     Solve Cloudflare Turnstile.
-    
-    PENTING: Kalau pakai proxy di browser, proxy yang sama harus dipakai di sini
-    agar token di-bind ke IP yang sama dengan yang submit form.
-    
-    Args:
-        proxy: format "http://user:pass@host:port" atau "socks5://..."
+    Kalau proxy disediakan, pakai TurnstileTask (dengan proxy) agar token IP match.
     """
-    log.info(f"[capsolver] Solving Turnstile untuk {url}{'  via proxy' if proxy else ''}...")
+    log.info(f"[capsolver] Solving Turnstile {'via proxy' if proxy else 'proxyless'}...")
 
     task: dict = {
         "websiteURL": url,
@@ -77,14 +72,14 @@ def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_T
     }
 
     if proxy:
-        # Pakai proxy — token akan di-bind ke IP proxy
-        task["type"] = "TurnstileTask"
-        # Parse proxy ke format CapSolver
         proxy_data = _parse_proxy(proxy)
         if proxy_data:
+            task["type"] = "TurnstileTask"
             task.update(proxy_data)
+            log.info(f"[capsolver] Pakai proxy: {proxy_data.get('proxyAddress')}:{proxy_data.get('proxyPort')}")
         else:
-            # Fallback ke proxyless kalau proxy tidak valid
+            # Proxy tidak valid — fallback ke proxyless
+            log.warning("[capsolver] Proxy tidak valid, fallback ke proxyless")
             task["type"] = "AntiTurnstileTaskProxyLess"
     else:
         task["type"] = "AntiTurnstileTaskProxyLess"
@@ -93,20 +88,16 @@ def solve_turnstile(api_key: str, url: str = CF_SIGNUP_URL, site_key: str = CF_T
     if solution:
         token = solution.get("token")
         if token:
-            log.info(f"[capsolver] ✓ Turnstile token: {token[:20]}...")
+            log.info(f"[capsolver] ✓ Token: {token[:20]}...")
         return token
     return None
 
 
 def _parse_proxy(proxy: str) -> dict | None:
-    """
-    Parse proxy URL ke format CapSolver.
-    Input:  http://user:pass@host:port
-    Output: {proxyType, proxyAddress, proxyPort, proxyLogin, proxyPassword}
-    """
-    import re
+    """Parse proxy URL ke format CapSolver TurnstileTask."""
     try:
-        # Detect proxy type
+        original = proxy
+        # Detect type
         if proxy.startswith("socks5://"):
             proxy_type = "socks5"
             proxy = proxy[9:]
@@ -115,32 +106,35 @@ def _parse_proxy(proxy: str) -> dict | None:
             proxy = proxy[9:]
         else:
             proxy_type = "http"
-            proxy = proxy.replace("http://", "").replace("https://", "")
+            for prefix in ("http://", "https://"):
+                if proxy.startswith(prefix):
+                    proxy = proxy[len(prefix):]
 
-        # Parse user:pass@host:port
+        # Parse auth dan host
         if "@" in proxy:
             auth, hostport = proxy.rsplit("@", 1)
-            if ":" in auth:
-                login, password = auth.split(":", 1)
-            else:
-                login, password = auth, ""
+            login, password = auth.split(":", 1) if ":" in auth else (auth, "")
         else:
             hostport = proxy
             login, password = "", ""
+
+        if ":" not in hostport:
+            log.warning(f"[capsolver] Proxy format invalid: {original}")
+            return None
 
         host, port = hostport.rsplit(":", 1)
 
         result = {
             "proxyType":    proxy_type,
-            "proxyAddress": host,
-            "proxyPort":    int(port),
+            "proxyAddress": host.strip(),
+            "proxyPort":    int(port.strip()),
         }
         if login:
-            result["proxyLogin"]    = login
-            result["proxyPassword"] = password
+            result["proxyLogin"]    = login.strip()
+            result["proxyPassword"] = password.strip()
         return result
     except Exception as e:
-        log.warning(f"[capsolver] Gagal parse proxy: {e}")
+        log.warning(f"[capsolver] Parse proxy error: {e} — proxy={proxy}")
         return None
 
 
