@@ -1,5 +1,9 @@
+# emails.txt — daftar akun Google/Gmail untuk mode google
+#
 # Format: email:password (satu per baris)
 # Baris yang diawali # diabaikan
+#
 # Contoh:
 # akun1@gmail.com:MyP@ssw0rd123
-# akun2@yourdomain.com:AnotherPass456
+# akun2@gmail.com:AnotherP@ss456
+# akun3@yourdomain.com:GSuitePass!789
